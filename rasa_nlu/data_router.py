@@ -267,7 +267,8 @@ class DataRouter(object):
                             "Error: {}".format(project, e))
 
         time = data.get('time')
-        response = self.project_store[project].parse(data['text'], time,
+        tz = data.get('tz')
+        response = self.project_store[project].parse(data['text'], time, tz,
                                                      model)
 
         if self.responses:

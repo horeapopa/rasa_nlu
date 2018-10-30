@@ -77,19 +77,19 @@ class DucklingHTTPExtractor(EntityExtractor):
 
         return self.component_config.get("url")
 
-    def _payload(self, text, reference_time):
+    def _payload(self, text, reference_time, tz):
         return {
             "text": text,
             "locale": self._locale(),
-            "tz": self.component_config.get("timezone"),
+            "tz": tz if tz else self.component_config.get("timezone"),
             "reftime": reference_time
         }
 
-    def _duckling_parse(self, text, reference_time):
+    def _duckling_parse(self, text, reference_time, tz):
         """Sends the request to the duckling server and parses the result."""
 
         try:
-            payload = self._payload(text, reference_time)
+            payload = self._payload(text, reference_time, tz)
             headers = {"Content-Type": "application/x-www-form-urlencoded; "
                                        "charset=UTF-8"}
             response = requests.post(self._url() + "/parse",
@@ -130,7 +130,7 @@ class DucklingHTTPExtractor(EntityExtractor):
 
         if self._url() is not None:
             reference_time = self._reference_time_from_message(message)
-            matches = self._duckling_parse(message.text, reference_time)
+            matches = self._duckling_parse(message.text, reference_time, message.tz)
             dimensions = self.component_config["dimensions"]
             relevant_matches = filter_irrelevant_matches(matches, dimensions)
             extracted = convert_duckling_format_to_rasa(relevant_matches)

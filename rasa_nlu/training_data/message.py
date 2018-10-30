@@ -9,9 +9,10 @@ from rasa_nlu.utils import ordered
 
 
 class Message(object):
-    def __init__(self, text, data=None, output_properties=None, time=None):
+    def __init__(self, text, data=None, output_properties=None, time=None, tz=None):
         self.text = text
         self.time = time
+        self.tz = tz
         self.data = data if data else {}
 
         if output_properties:
