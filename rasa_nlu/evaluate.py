@@ -4,23 +4,23 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import itertools
+from collections import defaultdict, namedtuple
+
 import json
+import os
 import logging
+import numpy as np
 import shutil
-from collections import defaultdict
-from collections import namedtuple
 from typing import List, Optional, Text
 
-import numpy as np
-
-from rasa_nlu import training_data, utils, config
+from rasa_nlu import config, training_data, utils
 from rasa_nlu.config import RasaNLUModelConfig
-from rasa_nlu.model import Interpreter
-from rasa_nlu.model import Trainer, TrainingData
+from rasa_nlu.extractors.crf_entity_extractor import CRFEntityExtractor
+from rasa_nlu.model import Interpreter, Trainer, TrainingData
 
 logger = logging.getLogger(__name__)
 
-duckling_extractors = {"ner_duckling", "ner_duckling_http"}
+duckling_extractors = {"ner_duckling_http"}
 
 known_duckling_dimensions = {"amount-of-money", "distance", "duration",
                              "email", "number",
@@ -62,8 +62,17 @@ def create_argument_parser():
     parser.add_argument('-f', '--folds', required=False, default=10,
                         help="number of CV folds (crossvalidation only)")
 
+    parser.add_argument('--report', required=False, nargs='?',
+                        const="reports", default=False,
+                        help="output path to save the intent/entity"
+                             "metrics report")
+
+    parser.add_argument('--successes', required=False, nargs='?',
+                        const="successes.json", default=False,
+                        help="output path to save successful predictions")
+
     parser.add_argument('--errors', required=False, default="errors.json",
-                        help="output path for the json with wrong predictions")
+                        help="output path to save model errors")
 
     parser.add_argument('--histogram', required=False, default="hist.png",
                         help="output path for the confidence histogram")
@@ -76,14 +85,14 @@ def create_argument_parser():
     return parser
 
 
-def plot_confusion_matrix(cm, classes,
+def plot_confusion_matrix(cm,
+                          classes,
                           normalize=False,
                           title='Confusion matrix',
                           cmap=None,
                           zmin=1,
                           out=None):  # pragma: no cover
     """Print and plot the confusion matrix for the intent classification.
-
     Normalization can be applied by setting `normalize=True`."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
@@ -162,14 +171,15 @@ def log_evaluation_table(report,  # type: Text
     logger.info("Classification report: \n{}".format(report))
 
 
-def get_evaluation_metrics(targets, predictions):  # pragma: no cover
+def get_evaluation_metrics(targets, predictions, output_dict=False):
     """Compute the f1, precision, accuracy and summary report from sklearn."""
     from sklearn import metrics
 
     targets = clean_intent_labels(targets)
     predictions = clean_intent_labels(predictions)
 
-    report = metrics.classification_report(targets, predictions)
+    report = metrics.classification_report(targets, predictions,
+                                           output_dict=output_dict)
     precision = metrics.precision_score(targets, predictions,
                                         average='weighted')
     f1 = metrics.f1_score(targets, predictions, average='weighted')
@@ -212,37 +222,50 @@ def drop_intents_below_freq(td, cutoff=5):
     return TrainingData(keep_examples, td.entity_synonyms, td.regex_features)
 
 
-def save_nlu_errors(errors, filename):
-    """Write out nlu classification errors to a file."""
+def save_json(data, filename):
+    """Write out nlu classification to a file."""
 
     utils.write_to_file(filename,
-                        json.dumps(errors, indent=4, ensure_ascii=False))
-    logger.info("Model prediction errors saved to {}.".format(filename))
+                        json.dumps(data, indent=4, ensure_ascii=False))
 
 
-def collect_nlu_errors(intent_results):  # pragma: no cover
+def collect_nlu_successes(intent_results, successes_filename):
+    """Log messages which result in successful predictions
+    and save them to file"""
+
+    successes = [{"text": r.message,
+                  "intent": r.target,
+                  "intent_prediction": {"name": r.prediction,
+                                        "confidence": r.confidence}}
+                 for r in intent_results if r.target == r.prediction]
+
+    if successes:
+        save_json(successes, successes_filename)
+        logger.info("Model prediction successes saved to {}."
+                    .format(successes_filename))
+        logger.debug("\n\nSuccessfully predicted the following"
+                     "intents: \n{}".format(successes))
+    else:
+        logger.info("Your model made no successful predictions")
+
+
+def collect_nlu_errors(intent_results, errors_filename):
     """Log messages which result in wrong predictions and save them to file"""
 
-    # it could be interesting to include entity-errors later
-    # therefore we start with a "intent_errors" key
-    intent_errors = [{"text": r.message,
-                      "intent": r.target,
-                      "intent_prediction": {
-                          "name": r.prediction,
-                          "confidence": r.confidence
-                      }}
-                     for r in intent_results if r.target != r.prediction]
+    errors = [{"text": r.message,
+               "intent": r.target,
+               "intent_prediction": {"name": r.prediction,
+                                     "confidence": r.confidence}}
+              for r in intent_results if r.target != r.prediction]
 
-    if intent_errors:
-        logger.info("There were some nlu intent classification errors. "
-                    "Use `--verbose` to show them in the log.")
+    if errors:
+        save_json(errors, errors_filename)
+        logger.info("Model prediction errors saved to {}."
+                    .format(errors_filename))
         logger.debug("\n\nThese intent examples could not be classified "
-                     "correctly \n{}".format(intent_errors))
-
-        return {'intent_errors': intent_errors}
+                     "correctly: \n{}".format(errors))
     else:
-        logger.info("No prediction errors were found. You are AWESOME!")
-        return None
+        logger.info("Your model made no errors")
 
 
 def plot_intent_confidences(intent_results, intent_hist_filename):
@@ -261,6 +284,8 @@ def plot_intent_confidences(intent_results, intent_hist_filename):
 
 
 def evaluate_intents(intent_results,
+                     report_folder,
+                     successes_filename,
                      errors_filename,
                      confmat_filename,
                      intent_hist_filename):  # pragma: no cover
@@ -283,16 +308,28 @@ def evaluate_intents(intent_results,
 
     targets, predictions = _targets_predictions_from(intent_results)
 
-    report, precision, f1, accuracy = get_evaluation_metrics(targets,
-                                                             predictions)
+    if report_folder:
+        report, precision, f1, accuracy = get_evaluation_metrics(
+                targets, predictions, output_dict=True)
 
-    log_evaluation_table(report, precision, f1, accuracy)
+        report_filename = os.path.join(report_folder, 'intent_report.json')
 
-    # log and save misclassified samples to file for debugging
-    errors = collect_nlu_errors(intent_results)
+        save_json(report, report_filename)
+        logger.info("Classification report saved to {}."
+                    .format(report_filename))
 
-    if errors and errors_filename:
-        save_nlu_errors(errors, errors_filename)
+    else:
+        report, precision, f1, accuracy = get_evaluation_metrics(targets,
+                                                                 predictions)
+        log_evaluation_table(report, precision, f1, accuracy)
+
+    if successes_filename:
+        # save classified samples to file for debugging
+        collect_nlu_successes(intent_results, successes_filename)
+
+    if errors_filename:
+        # log and save misclassified samples to file for debugging
+        collect_nlu_errors(intent_results, errors_filename)
 
     if confmat_filename:
         from sklearn.metrics import confusion_matrix
@@ -331,7 +368,6 @@ def evaluate_intents(intent_results,
 
 def merge_labels(aligned_predictions, extractor=None):
     """Concatenates all labels of the aligned predictions.
-
     Takes the aligned prediction labels which are grouped for each message
     and concatenates them."""
 
@@ -354,9 +390,9 @@ def substitute_labels(labels, old, new):
 def evaluate_entities(targets,
                       predictions,
                       tokens,
-                      extractors):  # pragma: no cover
+                      extractors,
+                      report_folder):  # pragma: no cover
     """Creates summary statistics for each entity extractor.
-
     Logs precision, recall, and F1 per entity type for each extractor."""
 
     aligned_predictions = align_all_entity_predictions(targets, predictions,
@@ -371,9 +407,22 @@ def evaluate_entities(targets,
         merged_predictions = substitute_labels(
                 merged_predictions, "O", "no_entity")
         logger.info("Evaluation for entity extractor: {} ".format(extractor))
-        report, precision, f1, accuracy = get_evaluation_metrics(
-                merged_targets, merged_predictions)
-        log_evaluation_table(report, precision, f1, accuracy)
+        if report_folder:
+            report, precision, f1, accuracy = get_evaluation_metrics(
+                    merged_targets, merged_predictions, output_dict=True)
+
+            report_filename = extractor + "_report.json"
+            extractor_report = os.path.join(report_folder, report_filename)
+
+            save_json(report, extractor_report)
+            logger.info("Classification report for {} saved to {}."
+                        .format(extractor, extractor_report))
+
+        else:
+            report, precision, f1, accuracy = get_evaluation_metrics(
+                    merged_targets, merged_predictions)
+            log_evaluation_table(report, precision, f1, accuracy)
+
         result[extractor] = {
             "report": report,
             "precision": precision,
@@ -406,9 +455,7 @@ def determine_intersection(token, entity):
 
 def do_entities_overlap(entities):
     """Checks if entities overlap.
-
     I.e. cross each others start and end boundaries.
-
     :param entities: list of entities
     :return: boolean
     """
@@ -417,8 +464,8 @@ def do_entities_overlap(entities):
     for i in range(len(sorted_entities) - 1):
         curr_ent = sorted_entities[i]
         next_ent = sorted_entities[i + 1]
-        if (next_ent["start"] < curr_ent["end"]
-                and next_ent["entity"] != curr_ent["entity"]):
+        if (next_ent["start"] < curr_ent["end"] and
+                next_ent["entity"] != curr_ent["entity"]):
             return True
 
     return False
@@ -426,7 +473,6 @@ def do_entities_overlap(entities):
 
 def find_intersecting_entites(token, entities):
     """Finds the entities that intersect with a token.
-
     :param token: a single token
     :param entities: entities found by a single extractor
     :return: list of entities
@@ -446,7 +492,6 @@ def find_intersecting_entites(token, entities):
 
 def pick_best_entity_fit(token, candidates):
     """Determines the token label given intersecting entities.
-
     :param token: a single token
     :param candidates: entities found by a single extractor
     :return: entity type
@@ -462,31 +507,37 @@ def pick_best_entity_fit(token, candidates):
         return candidates[best_fit]["entity"]
 
 
-def determine_token_labels(token, entities):
+def determine_token_labels(token, entities, extractors):
     """Determines the token label given entities that do not overlap.
-
-    :param token: a single token
-    :param entities: entities found by a single extractor
-    :return: entity type
+    Args:
+        token: a single token
+        entities: entities found by a single extractor
+        extractors: list of extractors
+    Returns:
+        entity type
     """
 
     if len(entities) == 0:
         return "O"
-
-    if do_entities_overlap(entities):
+    if (not do_extractors_support_overlap(extractors) and
+            do_entities_overlap(entities)):
         raise ValueError("The possible entities should not overlap")
 
     candidates = find_intersecting_entites(token, entities)
     return pick_best_entity_fit(token, candidates)
 
 
+def do_extractors_support_overlap(extractors):
+    """Checks if extractors support overlapping entities
+    """
+    return extractors is None or CRFEntityExtractor.name not in extractors
+
+
 def align_entity_predictions(targets, predictions, tokens, extractors):
     """Aligns entity predictions to the message tokens.
-
     Determines for every token the true label based on the
     prediction targets and the label assigned by each
     single extractor.
-
     :param targets: list of target entities
     :param predictions: list of predicted entities
     :param tokens: original message tokens
@@ -501,9 +552,10 @@ def align_entity_predictions(targets, predictions, tokens, extractors):
         entities_by_extractors[p["extractor"]].append(p)
     extractor_labels = defaultdict(list)
     for t in tokens:
-        true_token_labels.append(determine_token_labels(t, targets))
+        true_token_labels.append(
+                determine_token_labels(t, targets, None))
         for extractor, entities in entities_by_extractors.items():
-            extracted = determine_token_labels(t, entities)
+            extracted = determine_token_labels(t, entities, extractor)
             extractor_labels[extractor].append(extracted)
 
     return {"target_labels": true_token_labels,
@@ -513,7 +565,6 @@ def align_entity_predictions(targets, predictions, tokens, extractors):
 def align_all_entity_predictions(targets, predictions, tokens, extractors):
     """ Aligns entity predictions to the message tokens for the whole dataset
         using align_entity_predictions
-
     :param targets: list of lists of target entities
     :param predictions: list of lists of predicted entities
     :param tokens: list of original message tokens
@@ -594,7 +645,6 @@ def get_entity_predictions(interpreter, test_data):  # pragma: no cover
 
 def get_entity_extractors(interpreter):
     """Finds the names of entity extractors used by the interpreter.
-
     Processors are removed since they do not
     detect the boundaries themselves."""
 
@@ -618,7 +668,6 @@ def combine_extractor_and_dimension_name(extractor, dim):
 
 def get_duckling_dimensions(interpreter, duckling_extractor_name):
     """Gets the activated dimensions of a duckling extractor.
-
     If there are no activated dimensions, it uses all known
     dimensions as a fallback."""
 
@@ -663,6 +712,8 @@ def remove_duckling_entities(entity_predictions):
 
 
 def run_evaluation(data_path, model,
+                   report_folder=None,
+                   successes_filename=None,
                    errors_filename='errors.json',
                    confmat_filename=None,
                    intent_hist_filename=None,
@@ -689,6 +740,9 @@ def run_evaluation(data_path, model,
         "entity_evaluation": None
     }
 
+    if report_folder:
+        utils.create_dir(report_folder)
+
     if is_intent_classifier_present(interpreter):
         intent_targets = get_intent_targets(test_data)
         intent_results = get_intent_predictions(
@@ -696,6 +750,8 @@ def run_evaluation(data_path, model,
 
         logger.info("Intent evaluation results:")
         result['intent_evaluation'] = evaluate_intents(intent_results,
+                                                       report_folder,
+                                                       successes_filename,
                                                        errors_filename,
                                                        confmat_filename,
                                                        intent_hist_filename)
@@ -707,7 +763,8 @@ def run_evaluation(data_path, model,
         result['entity_evaluation'] = evaluate_entities(entity_targets,
                                                         entity_predictions,
                                                         tokens,
-                                                        extractors)
+                                                        extractors,
+                                                        report_folder)
 
     return result
 
@@ -753,7 +810,6 @@ def combine_entity_result(results, interpreter, data):
 def run_cv_evaluation(data, n_folds, nlu_config):
     # type: (TrainingData, int, RasaNLUModelConfig) -> CVEvaluationResult
     """Stratified cross validation on data
-
     :param data: Training Data
     :param n_folds: integer, number of cv folds
     :param nlu_config: nlu config file
@@ -909,6 +965,8 @@ def main():
     elif cmdline_args.mode == "evaluation":
         run_evaluation(cmdline_args.data,
                        cmdline_args.model,
+                       cmdline_args.report,
+                       cmdline_args.successes,
                        cmdline_args.errors,
                        cmdline_args.confmat,
                        cmdline_args.histogram)

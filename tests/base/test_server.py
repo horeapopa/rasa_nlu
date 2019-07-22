@@ -10,7 +10,7 @@ import tempfile
 
 import pytest
 import time
-import yaml
+import ruamel.yaml as yaml
 from treq.testing import StubTreq
 
 from rasa_nlu.data_router import DataRouter
@@ -58,12 +58,6 @@ def test_status(app):
     assert "current_training_processes" in rjs
     assert "max_training_processes" in rjs
     assert "default" in rjs["available_projects"]
-
-
-@pytest.inlineCallbacks
-def test_config(app):
-    response = yield app.get("http://dummy-uri/config")
-    assert response.code == 200
 
 
 @pytest.inlineCallbacks

@@ -4,6 +4,15 @@ Migration Guide
 This page contains information about changes between major versions and
 how you can migrate from one version to another.
 
+0.13.x to 0.14.0
+----------------
+- ``/config`` endpoint removed, when training a new model, the user should
+  always post the configuration as part of the request instead of relying
+  on the servers config.
+- ``ner_duckling`` support has been removed. Use ``ner_duckling_http``
+  instead. More info about ``ner_duckling_http`` can be found at
+  https://rasa.com/docs/nlu/components/#ner-duckling-http.
+
 0.13.x to 0.13.3
 ----------------
 - ``rasa_nlu.server`` has to  be supplied with a ``yml`` file defining the
