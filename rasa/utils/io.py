@@ -1,18 +1,19 @@
 import asyncio
 import errno
+import json
 import logging
 import os
 import tarfile
 import tempfile
+import typing
 import warnings
 import zipfile
+import glob
 from asyncio import AbstractEventLoop
-from typing import Text, Any, Dict, Union, List, Type, Callable
-import ruamel.yaml as yaml
 from io import BytesIO as IOReader
+from typing import Text, Any, Dict, Union, List, Type, Callable
 
-import simplejson
-import typing
+import ruamel.yaml as yaml
 
 from rasa.constants import ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL
 
@@ -38,7 +39,9 @@ def configure_colored_logging(loglevel):
     )
 
 
-def enable_async_loop_debugging(event_loop: AbstractEventLoop) -> AbstractEventLoop:
+def enable_async_loop_debugging(
+    event_loop: AbstractEventLoop, slow_callback_duration: float = 0.1
+) -> AbstractEventLoop:
     logging.info(
         "Enabling coroutine debugging. Loop id {}.".format(id(asyncio.get_event_loop()))
     )
@@ -48,7 +51,7 @@ def enable_async_loop_debugging(event_loop: AbstractEventLoop) -> AbstractEventL
 
     # Make the threshold for "slow" tasks very very small for
     # illustration. The default is 0.1 (= 100 milliseconds).
-    event_loop.slow_callback_duration = 0.001
+    event_loop.slow_callback_duration = slow_callback_duration
 
     # Report all mistakes managing asynchronous resources.
     warnings.simplefilter("always", ResourceWarning)
@@ -99,6 +102,7 @@ def read_yaml(content: Text) -> Union[List[Any], Dict[Text, Any]]:
         content: A text containing yaml content.
     """
     fix_yaml_loader()
+
     replace_environment_variables()
 
     yaml_parser = yaml.YAML(typ="safe")
@@ -136,7 +140,7 @@ def read_json_file(filename: Text) -> Any:
     """Read json from a file."""
     content = read_file(filename)
     try:
-        return simplejson.loads(content)
+        return json.loads(content)
     except ValueError as e:
         raise ValueError(
             "Failed to read json from '{}'. Error: "
@@ -290,6 +294,72 @@ def create_validator(
     return FunctionValidator
 
 
+def list_files(path: Text) -> List[Text]:
+    """Returns all files excluding hidden files.
+
+    If the path points to a file, returns the file."""
+
+    return [fn for fn in list_directory(path) if os.path.isfile(fn)]
+
+
+def list_subdirectories(path: Text) -> List[Text]:
+    """Returns all folders excluding hidden files.
+
+    If the path points to a file, returns an empty list."""
+
+    return [fn for fn in glob.glob(os.path.join(path, "*")) if os.path.isdir(fn)]
+
+
+def _filename_without_prefix(file: Text) -> Text:
+    """Splits of a filenames prefix until after the first ``_``."""
+    return "_".join(file.split("_")[1:])
+
+
+def list_directory(path: Text) -> List[Text]:
+    """Returns all files and folders excluding hidden files.
+
+    If the path points to a file, returns the file. This is a recursive
+    implementation returning files in any depth of the path."""
+
+    if not isinstance(path, str):
+        raise ValueError(
+            "`resource_name` must be a string type. "
+            "Got `{}` instead".format(type(path))
+        )
+
+    if os.path.isfile(path):
+        return [path]
+    elif os.path.isdir(path):
+        results = []
+        for base, dirs, files in os.walk(path):
+            # sort files for same order across runs
+            files = sorted(files, key=_filename_without_prefix)
+            # add not hidden files
+            good_files = filter(lambda x: not x.startswith("."), files)
+            results.extend(os.path.join(base, f) for f in good_files)
+            # add not hidden directories
+            good_directories = filter(lambda x: not x.startswith("."), dirs)
+            results.extend(os.path.join(base, f) for f in good_directories)
+        return results
+    else:
+        raise ValueError(
+            "Could not locate the resource '{}'.".format(os.path.abspath(path))
+        )
+
+
+def create_directory(directory_path: Text) -> None:
+    """Creates a directory and its super paths.
+
+    Succeeds even if the path already exists."""
+
+    try:
+        os.makedirs(directory_path)
+    except OSError as e:
+        # be happy if someone already created the path
+        if e.errno != errno.EEXIST:
+            raise
+
+
 def zip_folder(folder: Text) -> Text:
     """Create an archive from a folder."""
     import tempfile
@@ -298,5 +368,5 @@ def zip_folder(folder: Text) -> Text:
     zipped_path = tempfile.NamedTemporaryFile(delete=False)
     zipped_path.close()
 
-    # WARN: not thread save!
+    # WARN: not thread-safe!
     return shutil.make_archive(zipped_path.name, str("zip"), folder)
