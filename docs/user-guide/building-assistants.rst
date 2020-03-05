@@ -93,11 +93,6 @@ We’ll also need to add the intents, actions and templates to our ``domain.yml`
      - bye
      - thank
 
-   actions:
-     - utter_greet
-     - utter_noworries
-     - utter_bye
-
    templates:
      utter_noworries:
        - text: No worries!
@@ -186,7 +181,7 @@ The test command will produce a directory named ``results``. It should contain a
 called ``failed_stories.md``, where any test cases that failed will be printed. It will
 also specify whether it was an NLU or Core prediction that went wrong.  As part of a
 CI/CD pipeline, the test option ``--fail-on-prediction-errors`` can be used to throw
-an exception that and stop the pipeline.
+an exception that stops the pipeline.
 
 Response Selectors
 ^^^^^^^^^^^^^^^^^^
@@ -279,9 +274,6 @@ to the list of actions. These actions always have to start with the ``respond_``
 .. code-block:: yaml
 
    actions:
-     - utter_greet
-     - utter_noworries
-     - utter_bye
      - respond_faq
 
 Next we’ll write a story so that Core knows which action to predict:
@@ -585,6 +577,7 @@ At this point, you already have a working form, so let’s try it out. Make sure
     url: "http://localhost:5055/webhook"
 
 Then start the action server in a new terminal window:
+
 .. code-block:: bash
 
     rasa run actions
@@ -655,7 +648,8 @@ yet we don’t want the intent to affect the dialogue history. To do this, the r
 must be an action that returns the ``UserUtteranceReverted()`` event to remove the
 interaction from the dialogue history.
 
-First, open the ``domain.yml`` and modify the greet intent and add ``action_greet`` as shown here:
+First, open the ``domain.yml`` and modify the greet intent and add a new block ```actions``` in
+the file, next, add the ``action_greet`` as shown here:
 
 .. code-block:: yaml
 
@@ -667,11 +661,7 @@ First, open the ``domain.yml`` and modify the greet intent and add ``action_gree
      - contact_sales
      - inform
 
-   Actions:
-     - utter_greet
-     - utter_noworries
-     - utter_bye
-     - respond_faq
+   actions:
      - action_greet
 
 Remove any stories using the "greet" intent if you have them.
@@ -763,7 +753,7 @@ unfeaturized slots are only used for storing information. The stories for this s
        - sales_form
        - form{"name": null}
 
-   ## explain email
+   ## explain budget
    * contact_sales
        - sales_form
        - form{"name": "sales_form"}
@@ -783,10 +773,6 @@ We’ll need to add the intent and utterances we just added to our domain:
    - thank
    - faq
    - explain
-
-   actions:
-   - utter_explain_why_budget
-   - utter_explain_why_email
 
    templates:
      utter_explain_why_budget:
@@ -881,7 +867,7 @@ the bot respond with a default message like "Sorry, I can’t handle that reques
    * out_of_scope
      utter_out_of_scope
 
-We’ll need to add NLU data for the `out_of_scope` intent as well:
+We’ll need to add NLU data for the ``out_of_scope`` intent as well:
 
 .. code-block:: md
 
@@ -894,9 +880,6 @@ We’ll need to add NLU data for the `out_of_scope` intent as well:
 And finally we’ll add a template to our domain file:
 
 .. code-block:: yaml
-
-   actions:
-   - utter_out_of_scope
 
    templates:
      utter_out_of_scope:
